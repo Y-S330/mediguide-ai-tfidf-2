@@ -6,120 +6,104 @@ import pandas as pd
 import re
 import os
 
-st.set_page_config(page_title="MediGuide AI", layout="wide")
+st.set_page_config(page_title="MediGuide AI - Model 2", layout="wide")
 
 BASE = os.path.dirname(__file__)
 
-# ---------- STYLE ----------
+# ================================
+# SIDEBAR
+# ================================
+st.sidebar.title("MediGuide AI")
+st.sidebar.success("Model: TF-IDF")
+st.sidebar.info("Free-text symptom prediction.")
+
+# ================================
+# HEADER
+# ================================
 st.markdown("""
-    <style>
-    .main {
-        background-color: #0E1117;
-    }
-    .title {
-        font-size: 40px;
-        font-weight: bold;
-        color: #4CAF50;
-    }
-    .result-box {
-        background-color: #1E1E1E;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #4CAF50;
-        margin-top: 20px;
-    }
-    </style>
+<h1 style='text-align:center; color:#4CAF50;'>MediGuide AI</h1>
+<p style='text-align:center; color:gray;'>TF-IDF Disease Prediction</p>
 """, unsafe_allow_html=True)
 
-# ---------- CLEAN ----------
-def _clean(t):
+st.markdown("---")
+
+# ================================
+# CLEAN
+# ================================
+def clean(t):
     t = str(t).lower().strip()
     t = re.sub(r"[^a-z0-9 ]", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
+    return re.sub(r"\s+", " ", t)
 
-# ---------- LOADERS ----------
-@st.cache_resource
-def load_model():
-    return joblib.load(os.path.join(BASE, "symptoms_to_disease_model.pkl"))
+# ================================
+# LOAD
+# ================================
+model = joblib.load(os.path.join(BASE, "symptoms_to_disease_model.pkl"))
 
-@st.cache_data
-def load_precautions():
-    with open(os.path.join(BASE, "precautions_map.pkl"), "rb") as f:
-        return pickle.load(f)
+with open(os.path.join(BASE, "precautions_map.pkl"), "rb") as f:
+    prec_map = pickle.load(f)
 
-@st.cache_data
-def load_descriptions():
-    df = pd.read_csv(os.path.join(BASE, "symptom_Description.csv"))
-    return dict(zip(df["Disease"].apply(_clean), df["Description"]))
+desc_df = pd.read_csv(os.path.join(BASE, "symptom_Description.csv"))
+desc_map = dict(zip(desc_df["Disease"].str.lower().str.replace(" ",""), desc_df["Description"]))
 
-@st.cache_data
-def load_symptoms():
-    df = pd.read_csv(os.path.join(BASE, "DiseaseAndSymptoms.csv"))
-    syms = set()
-    for col in df.columns:
-        if "Symptom" in col:
-            syms.update(df[col].dropna().str.strip().tolist())
-    return sorted(syms)
+df = pd.read_csv(os.path.join(BASE, "DiseaseAndSymptoms.csv"))
+symptoms = set()
 
-# ---------- LOAD ----------
-model = load_model()
-prec_map = load_precautions()
-desc_map = load_descriptions()
-symptom_list = load_symptoms()
+for col in df.columns:
+    if "Symptom" in col:
+        symptoms.update(df[col].dropna().tolist())
 
-# ---------- PREDICT ----------
-def predict_topk(inp, k=5):
-    inp = _clean(inp)
-    if not inp:
-        return []
+symptom_list = sorted(symptoms)
 
-    proba = model.predict_proba([inp])[0]
-    top_idx = np.argsort(proba)[::-1][:k]
+# ================================
+# INPUT UI
+# ================================
+col1, col2 = st.columns(2)
 
-    return [(model.classes_[i], float(proba[i])) for i in top_idx]
+with col1:
+    selected = st.multiselect("🧠 Select Symptoms", symptom_list)
 
-def get_precautions(name):
-    return prec_map.get(_clean(name), [])
+with col2:
+    text = st.text_area("✍️ Type Symptoms")
 
-def get_description(name):
-    return desc_map.get(_clean(name), "No description available")
+center = st.columns([1,2,1])
+with center[1]:
+    diagnose = st.button("🔍 Diagnose")
 
-# ---------- UI ----------
-st.markdown('<p class="title">MediGuide AI - Disease Prediction System</p>', unsafe_allow_html=True)
-
-st.markdown("### 🧠 Select or Enter Symptoms")
-
-selected = st.multiselect("Select Symptoms", symptom_list)
-text = st.text_area("Or type symptoms manually")
-
-st.divider()
-
-if st.button("Diagnose"):
+# ================================
+# PREDICTION
+# ================================
+if diagnose:
     combined = " ".join(selected) + " " + text
 
-    with st.spinner("Analyzing symptoms..."):
-        results = predict_topk(combined)
-
-    if not results:
-        st.warning("Please enter at least one symptom.")
+    if not combined.strip():
+        st.warning("Enter symptoms")
     else:
-        disease, conf = results[0]
+        probs = model.predict_proba([combined])[0]
+        idx = np.argmax(probs)
 
-        st.markdown(f"""
-        <div class="result-box">
-        <h2 style='color:#4CAF50;'>Predicted Disease: {disease}</h2>
-        <p><b>Confidence:</b> {conf*100:.2f}%</p>
-        </div>
-        """, unsafe_allow_html=True)
+        disease = model.classes_[idx]
+        conf = probs[idx]
 
-        st.markdown("### 📄 Description")
-        st.info(get_description(disease))
+        key = disease.lower().replace(" ", "")
 
-        st.markdown("### 🛡️ Precautions")
-        precautions = get_precautions(disease)
+        st.markdown("---")
 
-        if precautions:
-            for p in precautions:
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric("Disease", disease)
+        c2.metric("Confidence", f"{conf*100:.2f}%")
+        c3.metric("Model", "TF-IDF")
+
+        st.markdown("---")
+
+        colA, colB = st.columns(2)
+
+        with colA:
+            st.markdown("### 📄 Description")
+            st.info(desc_map.get(key, "No description"))
+
+        with colB:
+            st.markdown("### 🛡️ Precautions")
+            for p in prec_map.get(key, []):
                 st.success(p)
-        else:
-            st.warning("No precautions available.")

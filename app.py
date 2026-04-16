@@ -10,6 +10,27 @@ st.set_page_config(page_title="MediGuide AI", layout="wide")
 
 BASE = os.path.dirname(__file__)
 
+# ---------- STYLE ----------
+st.markdown("""
+    <style>
+    .main {
+        background-color: #0E1117;
+    }
+    .title {
+        font-size: 40px;
+        font-weight: bold;
+        color: #4CAF50;
+    }
+    .result-box {
+        background-color: #1E1E1E;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #4CAF50;
+        margin-top: 20px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # ---------- CLEAN ----------
 def _clean(t):
     t = str(t).lower().strip()
@@ -58,35 +79,47 @@ def predict_topk(inp, k=5):
     return [(model.classes_[i], float(proba[i])) for i in top_idx]
 
 def get_precautions(name):
-    key = _clean(name)
-    return prec_map.get(key, [])
+    return prec_map.get(_clean(name), [])
 
 def get_description(name):
-    key = _clean(name)
-    return desc_map.get(key, "No description available")
+    return desc_map.get(_clean(name), "No description available")
 
 # ---------- UI ----------
-st.title("MediGuide AI")
+st.markdown('<p class="title">MediGuide AI - Disease Prediction System</p>', unsafe_allow_html=True)
+
+st.markdown("### 🧠 Select or Enter Symptoms")
 
 selected = st.multiselect("Select Symptoms", symptom_list)
-text = st.text_area("Or type symptoms")
+text = st.text_area("Or type symptoms manually")
+
+st.divider()
 
 if st.button("Diagnose"):
     combined = " ".join(selected) + " " + text
 
-    results = predict_topk(combined)
+    with st.spinner("Analyzing symptoms..."):
+        results = predict_topk(combined)
 
     if not results:
-        st.warning("Enter symptoms")
+        st.warning("Please enter at least one symptom.")
     else:
         disease, conf = results[0]
 
-        st.subheader(f"Predicted Disease: {disease}")
-        st.write(f"Confidence: {conf*100:.2f}%")
+        st.markdown(f"""
+        <div class="result-box">
+        <h2 style='color:#4CAF50;'>Predicted Disease: {disease}</h2>
+        <p><b>Confidence:</b> {conf*100:.2f}%</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        st.write("Description:")
-        st.write(get_description(disease))
+        st.markdown("### 📄 Description")
+        st.info(get_description(disease))
 
-        st.write("Precautions:")
-        for p in get_precautions(disease):
-            st.write("-", p)
+        st.markdown("### 🛡️ Precautions")
+        precautions = get_precautions(disease)
+
+        if precautions:
+            for p in precautions:
+                st.success(p)
+        else:
+            st.warning("No precautions available.")

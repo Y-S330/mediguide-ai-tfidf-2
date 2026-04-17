@@ -201,6 +201,11 @@ def _safe_html_text(text):
 def _display_name(text):
     return str(text).replace("_", " ").title()
 
+def _format_disease_name(name):
+    if not name:
+        return ""
+    return str(name).replace("_", " ").title()
+
 def _shorten_text(text, max_chars=450):
     text = str(text).strip()
     if len(text) <= max_chars:
@@ -426,8 +431,19 @@ def count_recognized(text):
     return count
 
 # ==============================
-# 8) RETRIEVAL / LOOKUPS
+# 8) RETRIEVAL / LOOKUPS (FINAL FIXED)
 # ==============================
+
+def stable_unique(seq):
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
 def retrieve_treatment_from_medquad(predicted_disease, top_k=2, min_token_hits=2):
     if medquad_df is None or not isinstance(medquad_df, pd.DataFrame):
         return []
@@ -496,25 +512,28 @@ def retrieve_treatment_from_medquad(predicted_disease, top_k=2, min_token_hits=2
     cands["ans_len"] = cands["a_clean"].astype(str).str.len()
     cands = cands.sort_values(["score", "ans_len"], ascending=[False, True])
 
-    answers = []
-    seen = set()
+    # 🔴 FIXED: stable_unique now exists
+    answers = stable_unique(cands["a_clean"].tolist())
 
-    for ans in cands["a_clean"].tolist():
-        cleaned_ans = str(ans).strip()
-        if cleaned_ans and cleaned_ans not in seen:
-            seen.add(cleaned_ans)
-            answers.append(_shorten_text(cleaned_ans))
-        if len(answers) >= int(top_k):
+    clean_answers = []
+    for a in answers:
+        a = str(a).strip()
+        if len(a.split()) >= 5:
+            clean_answers.append(_shorten_text(a))
+        if len(clean_answers) >= int(top_k):
             break
 
-    return answers
+    return clean_answers
+
 
 def get_precautions(disease_name):
     out = _match_lookup(disease_name, prec_map)
     return out if isinstance(out, list) else []
 
+
 def get_description(disease_name):
     return _match_lookup(disease_name, desc_map)
+
 
 def get_treatment(disease_name):
     fallback = _match_lookup(disease_name, TREATMENT_FALLBACK)
@@ -526,21 +545,28 @@ def get_treatment(disease_name):
         return mq
 
     return []
+# ==============================
+# 9) PREDICTION (FINAL OPTIMIZED)
+# ==============================
 
-# ==============================
-# 9) PREDICTION
-# ==============================
 def predict_topk(inp, k=5):
-    inp = normalize_free_text(inp)
-    inp = _clean(inp)
-
+    # 🔴 FIX: assume input already normalized + cleaned
     if not inp:
         return []
 
-    proba = model.predict_proba([inp])[0]
+    try:
+        proba = model.predict_proba([inp])[0]
+    except Exception as e:
+        print("[ERROR] predict_topk failed:", e)
+        return []
+
+    if proba is None or len(proba) == 0:
+        return []
+
     k = max(1, min(int(k), len(model.classes_)))
     top_idx = np.argsort(proba)[::-1][:k]
     return [(model.classes_[i], float(proba[i])) for i in top_idx]
+
 
 def confidence_level(top5):
     if not top5:
@@ -557,6 +583,62 @@ def confidence_level(top5):
     if top1 >= 0.05:
         return "low", margin
     return "none", margin
+
+
+def predict_disease_and_help(inp):
+    # 🔴 SINGLE CLEAN PIPELINE
+    cleaned_input = normalize_free_text(inp)
+    cleaned_input = _clean(cleaned_input)
+
+    if not cleaned_input:
+        return {"error": "Empty symptoms text"}
+
+    if len(cleaned_input.split()) < 3:
+        return {
+            "error": "Weak input",
+            "message": "Please enter at least 3 clear symptoms (e.g., fever, headache, nausea)"
+        }
+
+    if len(set(cleaned_input.split())) < 2:
+        return {
+            "error": "Low-quality input",
+            "message": "Enter more distinct symptoms"
+        }
+
+    # 🔴 PASS CLEANED INPUT DIRECTLY (no re-clean inside predict_topk)
+    top5 = predict_topk(cleaned_input, k=5)
+
+    if not top5:
+        return {"error": "Model failed to predict"}
+
+    disease = top5[0][0]
+    conf = float(top5[0][1])
+
+    if len(top5) >= 2:
+        margin = conf - float(top5[1][1])
+    else:
+        margin = conf
+
+    level, _ = confidence_level(top5)
+
+    if level in {"none", "low"}:
+        return {
+            "predicted_disease": _format_disease_name(disease),
+            "confidence": conf,
+            "margin": margin,
+            "warning": "Ambiguous prediction — needs more symptoms",
+            "top5": [(_format_disease_name(d), p) for d, p in top5]
+        }
+
+    return {
+        "predicted_disease": _format_disease_name(disease),
+        "confidence": conf,
+        "margin": margin,
+        "top5": [(_format_disease_name(d), p) for d, p in top5],
+        "precautions": get_precautions(disease),
+        "treatment_info": get_treatment(disease),
+        "description": get_description(disease)
+    }
 
 # ==============================
 # 10) SESSION STATE
@@ -649,7 +731,7 @@ with left:
         '<div class="section-label">Tips</div>'
         '<div class="about-box">'
         'Use symptoms from the same illness only. Mixing unrelated symptoms can lower confidence.<br><br>'
-        '<span class="small-muted">Commas are optional. Uppercase and lowercase both work.</span>'
+        '<span class="small-muted">Try to enter at least 3 clear symptoms for better results.</span>'
         '</div>',
         unsafe_allow_html=True
     )
@@ -664,25 +746,25 @@ with right:
             st.warning("⚠️ No known symptoms were recognized. Try clearer symptom words or use the dropdown list.")
         else:
             with st.spinner("Analyzing symptoms..."):
-                results = predict_topk(combined_text, k=5)
+                result = predict_disease_and_help(combined_text)
 
-            if not results:
+            if result.get("error") == "Weak input":
+                st.warning(f"⚠️ {result.get('message')}")
+            elif result.get("error") == "Low-quality input":
+                st.warning(f"⚠️ {result.get('message')}")
+            elif result.get("error"):
                 st.error("❌ Could not process input.")
             else:
-                level, margin = confidence_level(results)
-                top_disease, top_conf = results[0]
+                results = result.get("top5", [])
+                top_disease = result.get("predicted_disease", "")
+                top_conf = float(result.get("confidence", 0.0))
+                margin = float(result.get("margin", 0.0))
+                warning = result.get("warning")
 
-                if level == "none":
-                    st.markdown(
-                        '<div class="low-conf"><b>Could not identify a condition.</b><br>'
-                        'Try adding more specific symptoms such as fever, cough, headache, nausea, or chest pain.</div>',
-                        unsafe_allow_html=True
-                    )
-
-                elif level == "low":
+                if warning:
                     st.markdown(
                         '<div class="low-conf"><b>Low confidence prediction.</b><br>'
-                        'The model found some signal, but it is weak. Add more symptoms for a better result.</div>',
+                        'The model found some signal, but the result is still ambiguous. Add more specific symptoms for a better result.</div>',
                         unsafe_allow_html=True
                     )
 
@@ -696,21 +778,23 @@ with right:
                         bar_w = min(conf * 100, 100)
                         st.markdown(f"""
                         <div class="result-card">
-                            <div class="disease-name" style="font-size:1.08rem">{escape(_display_name(disease))}</div>
+                            <div class="disease-name" style="font-size:1.08rem">{escape(disease)}</div>
                             <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%;opacity:.6"></div></div>
                             <div class="small-muted">{conf * 100:.1f}% confidence</div>
                         </div>
                         """, unsafe_allow_html=True)
 
                 else:
-                    desc = get_description(top_disease)
-                    treatments = get_treatment(top_disease)
-                    precautions = get_precautions(top_disease)
+                    desc = result.get("description")
+                    treatments = result.get("treatment_info", [])
+                    precautions = result.get("precautions", [])
                     bar_w = min(top_conf * 100, 100)
+
+                    level, _ = confidence_level(results)
 
                     if level == "medium":
                         st.markdown(
-                            '<div class="warn-box">⚠️ Moderate confidence. Your symptoms also overlap with other conditions. Adding more symptom details may improve the result.</div>',
+                            '<div class="warn-box">⚠️ Moderate confidence. Your symptoms may overlap with other conditions. Adding more symptom details may improve the result.</div>',
                             unsafe_allow_html=True
                         )
 
@@ -739,7 +823,7 @@ with right:
                     st.markdown(f"""
                     <div class="result-card top">
                         <div class="small-muted">Top diagnosis</div>
-                        <div class="disease-name">{escape(_display_name(top_disease))}</div>
+                        <div class="disease-name">{escape(top_disease)}</div>
                         <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%"></div></div>
                         <div style="display:flex;justify-content:space-between;margin-top:.45rem">
                             <span class="small-muted">Confidence</span>
@@ -768,7 +852,7 @@ with right:
                             bar_w = min(conf * 100, 100)
                             st.markdown(f"""
                             <div class="result-card">
-                                <div class="disease-name" style="font-size:1.05rem">{escape(_display_name(disease))}</div>
+                                <div class="disease-name" style="font-size:1.05rem">{escape(disease)}</div>
                                 <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%;opacity:.65"></div></div>
                                 <div class="small-muted">{conf * 100:.1f}% confidence</div>
                             </div>

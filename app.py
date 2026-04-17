@@ -1,16 +1,18 @@
 import os
 import re
-import pickle
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 from html import escape
 
+# ==============================
+# 1) PAGE SETUP
+# ==============================
 st.set_page_config(page_title="MediGuide AI", page_icon="🩺", layout="wide")
 
 # ==============================
-# STYLE
+# 2) STYLE
 # ==============================
 st.markdown("""
 <style>
@@ -41,6 +43,10 @@ st.markdown("""
 .stTextArea textarea:focus {
     border-color: #38bdf8 !important;
     box-shadow: 0 0 0 3px rgba(56,189,248,.15) !important;
+}
+.stMultiSelect div[data-baseweb="select"] {
+    background: #020617 !important;
+    border-radius: 16px !important;
 }
 .stButton button {
     background: linear-gradient(135deg,#0ea5e9,#6366f1) !important;
@@ -150,7 +156,7 @@ st.markdown("""
 BASE = os.path.dirname(__file__)
 
 # ==============================
-# CURATED TREATMENT FALLBACK
+# 3) CURATED TREATMENT FALLBACK
 # ==============================
 TREATMENT_FALLBACK = {
     "malaria": "Treatment involves antimalarial medications such as artemisinin-based combination therapies (ACTs) or chloroquine depending on the Plasmodium species. Seek immediate medical care. Rest, hydration, and paracetamol for fever are supportive measures. Never self-medicate.",
@@ -177,11 +183,11 @@ TREATMENT_FALLBACK = {
     "psoriasis": "Topical treatments help mild cases. Phototherapy or systemic medicines may be needed for more severe disease. Regular moisturising also helps.",
     "arthritis": "Treatment depends on type. It may include pain relief, physiotherapy, disease-modifying drugs, or other targeted treatment.",
     "aids": "Antiretroviral therapy is essential. Early treatment and regular monitoring greatly improve long-term outcomes.",
-    "peptic ulcer diseae": "Treatment depends on cause. H. pylori ulcers are often treated with antibiotics plus a proton pump inhibitor. NSAID-related ulcers are treated by stopping the NSAID if possible and using acid suppression."
+    "peptic ulcer disease": "Treatment depends on cause. H. pylori ulcers are often treated with antibiotics plus a proton pump inhibitor. NSAID-related ulcers are treated by stopping the NSAID if possible and using acid suppression."
 }
 
 # ==============================
-# HELPERS
+# 4) CORE HELPERS
 # ==============================
 def _clean(text):
     text = str(text).lower().strip()
@@ -191,6 +197,9 @@ def _clean(text):
 
 def _safe_html_text(text):
     return escape(str(text)).replace("\n", "<br>")
+
+def _display_name(text):
+    return str(text).replace("_", " ").title()
 
 def _shorten_text(text, max_chars=450):
     text = str(text).strip()
@@ -205,15 +214,30 @@ def _tokenize(text):
 
 def _match_lookup(key, mapping):
     key = _clean(key)
+
     if key in mapping:
         return mapping[key]
+
+    key_tokens = set(key.split())
+    best_match = None
+    best_score = 0
+
     for k in mapping:
-        if k in key or key in k:
-            return mapping[k]
+        k_clean = _clean(k)
+        k_tokens = set(k_clean.split())
+        score = len(key_tokens & k_tokens)
+
+        if score > best_score:
+            best_score = score
+            best_match = k
+
+    if best_match and best_score >= 1:
+        return mapping[best_match]
+
     return None
 
 # ==============================
-# LOADERS
+# 5) LOADERS
 # ==============================
 @st.cache_resource
 def load_model():
@@ -224,23 +248,12 @@ def load_model():
         )
     return joblib.load(path)
 
-@st.cache_resource
-def load_model_lr():
-    path = os.path.join(BASE, "model_lr.pkl")
-    return joblib.load(path) if os.path.exists(path) else None
-
-@st.cache_resource
-def load_model_cnb():
-    path = os.path.join(BASE, "model_cnb.pkl")
-    return joblib.load(path) if os.path.exists(path) else None
-
 @st.cache_data
 def load_precautions():
     path = os.path.join(BASE, "precautions_map.pkl")
     if not os.path.exists(path):
         return {}
-    with open(path, "rb") as f:
-        data = pickle.load(f)
+    data = joblib.load(path)
     return data if isinstance(data, dict) else {}
 
 @st.cache_data
@@ -296,12 +309,10 @@ def load_symptoms_list():
     return sorted(vals)
 
 # ==============================
-# RESOURCE LOAD
+# 6) RESOURCE INIT
 # ==============================
 try:
     model = load_model()
-    model_lr = load_model_lr()
-    model_cnb = load_model_cnb()
     prec_map = load_precautions()
     desc_map = load_descriptions()
     medquad_df = load_medquad()
@@ -312,15 +323,13 @@ except Exception as e:
 
 if not hasattr(model, "predict_proba"):
     st.error(
-        "❌ The loaded main model does not support probability estimates. "
+        "❌ The loaded model does not support probability estimates. "
         "Use your calibrated symptoms_to_disease_model.pkl."
     )
     st.stop()
 
-_use_ensemble = (model_lr is not None) and (model_cnb is not None)
-
 # ==============================
-# SYMPTOM NORMALIZATION
+# 7) SYMPTOM NORMALIZATION
 # ==============================
 SYMPTOM_MAP = {
     "high fever": "high_fever", "fever": "high_fever", "very high fever": "high_fever",
@@ -392,10 +401,13 @@ def normalize_free_text(text):
     return " ".join(found) if found else text
 
 def count_recognized(text):
-    text = str(text).lower()
+    text = str(text).lower().strip()
     text = re.sub(r"[,;]+", " ", text)
-    remaining = text
+    text = re.sub(r"\band\b", " ", text)
+    text = re.sub(r"\s+", " ", text)
+
     count = 0
+    remaining = text
 
     for phrase in _SORTED_PHRASES:
         pattern = r"\b" + re.escape(phrase) + r"\b"
@@ -406,7 +418,7 @@ def count_recognized(text):
     return count
 
 # ==============================
-# RETRIEVAL / LOOKUPS
+# 8) RETRIEVAL / LOOKUPS
 # ==============================
 def retrieve_treatment_from_medquad(predicted_disease, top_k=2, min_token_hits=2):
     if medquad_df is None or not isinstance(medquad_df, pd.DataFrame):
@@ -495,7 +507,7 @@ def get_description(disease_name):
 def get_treatment(disease_name):
     fallback = _match_lookup(disease_name, TREATMENT_FALLBACK)
     if fallback:
-        return [fallback]
+        return [_shorten_text(fallback)]
 
     mq = retrieve_treatment_from_medquad(disease_name, top_k=2)
     if mq:
@@ -504,7 +516,7 @@ def get_treatment(disease_name):
     return []
 
 # ==============================
-# PREDICTION
+# 9) PREDICTION
 # ==============================
 def predict_topk(inp, k=5):
     inp = normalize_free_text(inp)
@@ -513,35 +525,8 @@ def predict_topk(inp, k=5):
     if not inp:
         return []
 
-    k = max(1, int(k))
-
-    if _use_ensemble:
-        weights = (0.5, 0.3, 0.2)
-        all_classes = model.classes_
-        n = len(all_classes)
-        k = min(k, n)
-        class_idx = {c: i for i, c in enumerate(all_classes)}
-
-        def align_proba(m):
-            p = m.predict_proba([inp])[0]
-            aligned = np.zeros(n, dtype=float)
-            for i, cls in enumerate(m.classes_):
-                idx = class_idx.get(cls)
-                if idx is not None:
-                    aligned[idx] = float(p[i])
-            return aligned
-
-        blended = (
-            weights[0] * align_proba(model) +
-            weights[1] * align_proba(model_lr) +
-            weights[2] * align_proba(model_cnb)
-        )
-
-        top_idx = np.argsort(blended)[::-1][:k]
-        return [(all_classes[i], float(blended[i])) for i in top_idx]
-
     proba = model.predict_proba([inp])[0]
-    k = min(k, len(model.classes_))
+    k = max(1, min(int(k), len(model.classes_)))
     top_idx = np.argsort(proba)[::-1][:k]
     return [(model.classes_[i], float(proba[i])) for i in top_idx]
 
@@ -553,16 +538,16 @@ def confidence_level(top5):
     top2 = float(top5[1][1]) if len(top5) > 1 else 0.0
     margin = top1 - top2
 
-    if top1 >= 0.40:
+    if top1 >= 0.40 and margin >= 0.10:
         return "high", margin
-    if top1 >= 0.33 and margin >= 0.12:
+    if top1 >= 0.33 and margin >= 0.08:
         return "medium", margin
     if top1 >= 0.05:
         return "low", margin
     return "none", margin
 
 # ==============================
-# STATE
+# 10) SESSION STATE
 # ==============================
 if "selected_syms" not in st.session_state:
     st.session_state["selected_syms"] = []
@@ -570,7 +555,7 @@ if "free_text" not in st.session_state:
     st.session_state["free_text"] = ""
 
 # ==============================
-# UI
+# 11) HERO / HEADER
 # ==============================
 st.markdown(
     '<div class="hero"><h1>🩺 MediGuide AI</h1>'
@@ -578,21 +563,16 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if _use_ensemble:
-    st.markdown(
-        '<div style="text-align:center;margin-bottom:1rem">'
-        '<span class="metric-pill">⚡ Ensemble Mode: LinearSVC + Logistic Regression + ComplementNB</span>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown(
-        '<div style="text-align:center;margin-bottom:1rem">'
-        '<span class="metric-pill">⚠️ Single Model Mode</span>'
-        '</div>',
-        unsafe_allow_html=True
-    )
+st.markdown(
+    '<div style="text-align:center;margin-bottom:1rem">'
+    '<span class="metric-pill">🧠 Single Model: TF-IDF + Calibrated LinearSVC</span>'
+    '</div>',
+    unsafe_allow_html=True
+)
 
+# ==============================
+# 12) MAIN LAYOUT
+# ==============================
 left, right = st.columns([1, 1], gap="large")
 
 with left:
@@ -601,7 +581,7 @@ with left:
     selected_syms = st.multiselect(
         "Choose from known symptoms",
         options=symptom_list,
-        format_func=lambda x: x.replace("_", " ").title(),
+        format_func=lambda x: _display_name(x),
         placeholder="Search symptoms...",
         key="selected_syms"
     )
@@ -704,7 +684,7 @@ with right:
                         bar_w = min(conf * 100, 100)
                         st.markdown(f"""
                         <div class="result-card">
-                            <div class="disease-name" style="font-size:1.08rem">{escape(disease.title())}</div>
+                            <div class="disease-name" style="font-size:1.08rem">{escape(_display_name(disease))}</div>
                             <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%;opacity:.6"></div></div>
                             <div class="small-muted">{conf * 100:.1f}% confidence</div>
                         </div>
@@ -747,7 +727,7 @@ with right:
                     st.markdown(f"""
                     <div class="result-card top">
                         <div class="small-muted">Top diagnosis</div>
-                        <div class="disease-name">{escape(top_disease.title())}</div>
+                        <div class="disease-name">{escape(_display_name(top_disease))}</div>
                         <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%"></div></div>
                         <div style="display:flex;justify-content:space-between;margin-top:.45rem">
                             <span class="small-muted">Confidence</span>
@@ -776,7 +756,7 @@ with right:
                             bar_w = min(conf * 100, 100)
                             st.markdown(f"""
                             <div class="result-card">
-                                <div class="disease-name" style="font-size:1.05rem">{escape(disease.title())}</div>
+                                <div class="disease-name" style="font-size:1.05rem">{escape(_display_name(disease))}</div>
                                 <div class="bar-bg"><div class="bar" style="width:{bar_w:.0f}%;opacity:.65"></div></div>
                                 <div class="small-muted">{conf * 100:.1f}% confidence</div>
                             </div>

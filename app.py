@@ -665,7 +665,7 @@ st.markdown(
 )
 
 # ==============================
-# 12) MAIN LAYOUT
+# 12) MAIN LAYOUT (FINAL FIXED)
 # ==============================
 left, right = st.columns([1, 1], gap="large")
 
@@ -692,13 +692,19 @@ with left:
     has_dropdown_symptoms = len(selected_syms) > 0
 
     c1, c2 = st.columns([2, 1])
+
     with c1:
         run = st.button("🔍 Diagnose", use_container_width=True)
+
     with c2:
-        if st.button("Clear", use_container_width=True):
-            st.session_state["selected_syms"] = []
-            st.session_state["free_text"] = ""
-            st.rerun()
+        clear_clicked = st.button("Clear", use_container_width=True)
+
+    # 🔴 FIXED CLEAR BUTTON (SAFE VERSION)
+    if clear_clicked:
+        for key in ["selected_syms", "free_text"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
 
     if free_text.strip():
         remaining = free_text.lower()
@@ -859,7 +865,7 @@ with right:
                             """, unsafe_allow_html=True)
 
                     st.markdown(
-                        '<div class="warn-box">⚕️ AI-generated educational result. It is not a medical diagnosis. Always consult a qualified doctor, especially if symptoms are severe, sudden, or worsening.</div>',
+                        '<div class="warn-box">⚕️ AI-generated educational result. It is not a medical diagnosis. Always consult a qualified doctor.</div>',
                         unsafe_allow_html=True
                     )
     else:
@@ -870,5 +876,3 @@ with right:
             '</div>',
             unsafe_allow_html=True
         )
-
-st.markdown('<div class="footer">MediGuide AI • For educational purposes only</div>', unsafe_allow_html=True)
